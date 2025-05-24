@@ -14,9 +14,7 @@ class StripeConnectApiController extends Controller
 {
     public function getAuthUrl(Request $request)
     {
-        // if (!$request->expectsJson()) {
-        //     return response()->json(['error' => 'JSON response is required'], 406);
-        // }
+
         try {
             Stripe::setApiKey(config('services.stripe.secret'));
             
@@ -61,33 +59,40 @@ class StripeConnectApiController extends Controller
             // Get the connected account ID
             $connectedAccountId = $response->stripe_user_id;
             
-            // Store or update user information
-            $userData = [
-                'stripe_account_id' => $connectedAccountId,
-                'stripe_access_token' => $response->access_token,
-                'stripe_refresh_token' => $response->refresh_token ?? null
-            ];
-
-            if (Auth::check()) {
-                User::where('id', Auth::id())->update($userData);
-                $user = Auth::user();
-            } else {
-                // Create a new user with just the Stripe info
-                $user = User::create([
-                    'stripe_account_id' => $connectedAccountId,
+            // Get account details from Stripe
+            $account = Account::retrieve($connectedAccountId);
+            
+            // Create or update user
+            $user = User::updateOrCreate(
+                ['stripe_account_id' => $connectedAccountId],
+                [
                     'stripe_access_token' => $response->access_token,
                     'stripe_refresh_token' => $response->refresh_token ?? null,
-                    'email' => 'user_' . $connectedAccountId . '@example.com', // Placeholder email
-                    'name' => 'Stripe User ' . $connectedAccountId,
+                    'email' => $account->email ?? 'user_' . $connectedAccountId . '@example.com',
+                    'name' => $account->business_profile->name ?? 'Stripe User ' . $connectedAccountId,
                     'password' => bcrypt(uniqid())
-                ]);
-            }
+                ]
+            );
+
+            // Generate JWT token
+            $token = Auth::login($user);
 
             return response()->json([
                 'success' => true,
                 'message' => 'Stripe account connected successfully',
-                'stripe_account_id' => $connectedAccountId
-                
+                'data' => [
+                    'stripe_account_id' => $connectedAccountId,
+                    'stripe_access_token' => $response->access_token,
+                    'user' => [
+                        'id' => $user->id,
+                        'email' => $user->email,
+                        'name' => $user->name
+                    ],
+                    'authorization' => [
+                        'token' => $token,
+                        'type' => 'bearer'
+                    ]
+                ]
             ]);
             
         } catch (\Exception $e) {
