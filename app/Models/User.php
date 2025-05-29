@@ -26,6 +26,7 @@ class User extends Authenticatable implements JWTSubject
         'stripe_account_id',
         'stripe_access_token',
         'stripe_refresh_token',
+        'stripe_access_code',
     ];
 
     /**

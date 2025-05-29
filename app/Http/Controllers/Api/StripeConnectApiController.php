@@ -49,20 +49,17 @@ class StripeConnectApiController extends Controller
             }
 
             Stripe::setApiKey(config('services.stripe.secret'));
-
-            // Exchange the authorization code for an access token
             $response = OAuth::token([
                 'grant_type' => 'authorization_code',
                 'code' => $request->code,
             ]);
 
-            // Get the connected account ID
+            
             $connectedAccountId = $response->stripe_user_id;
             
             // Get account details from Stripe
             $account = Account::retrieve($connectedAccountId);
             
-            // Create or update user
             $user = User::updateOrCreate(
                 ['stripe_account_id' => $connectedAccountId],
                 [
@@ -70,7 +67,8 @@ class StripeConnectApiController extends Controller
                     'stripe_refresh_token' => $response->refresh_token ?? null,
                     'email' => $account->email ?? 'user_' . $connectedAccountId . '@example.com',
                     'name' => $account->business_profile->name ?? 'Stripe User ' . $connectedAccountId,
-                    'password' => bcrypt(uniqid())
+                    'password' => bcrypt(uniqid()),
+                    'stripe_access_code' =>$request->code,
                 ]
             );
 
@@ -81,8 +79,10 @@ class StripeConnectApiController extends Controller
                 'success' => true,
                 'message' => 'Stripe account connected successfully',
                 'data' => [
+                    'value' => 1,
                     'stripe_account_id' => $connectedAccountId,
                     'stripe_access_token' => $response->access_token,
+                    'stripe_access_code' =>$user->stripe_access_code,
                     'user' => [
                         'id' => $user->id,
                         'email' => $user->email,
@@ -102,4 +102,21 @@ class StripeConnectApiController extends Controller
             ], 500);
         }
     }
+
+    public function exchangeCode(Request $request)
+    {
+        $code = $request->code;
+        $user = User::where('stripe_access_code', $code)->first();
+        if($user)
+        {
+            $token = Auth::login($user);
+            return response()->json([
+                'success' => true,
+                'message' => 'User found',
+                'user' => $user,
+                'token' => $token,
+            ]);
+        }
+    }
+
 }
