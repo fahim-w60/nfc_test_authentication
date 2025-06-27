@@ -12,7 +12,7 @@ class Transaction extends Model
         'payment_intent_id',
         'amount',
         'platform_fee',
-        'currency',
+        // 'currency',
         'status',
         'payment_method_type',
         'metadata'

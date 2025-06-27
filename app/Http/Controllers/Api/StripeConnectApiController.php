@@ -119,4 +119,12 @@ class StripeConnectApiController extends Controller
         }
     }
 
+    public function getSecretKey()
+    {
+        return response()->json([
+            'success' => true,
+            'secret_key' => config('services.stripe.secret')
+        ]);
+    }
+
 }

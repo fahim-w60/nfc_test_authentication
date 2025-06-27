@@ -17,17 +17,18 @@ class PaymentController extends Controller
         try {
             $request->validate([
                 'amount' => 'required|numeric|min:1',
-                'currency' => 'required|string|size:3'
+                'currency' => 'required|string|size:3',
+                'account' => 'required|string',
             ]);
 
             // Get authenticated merchant
-            $merchant = Auth::user();
-            if (!$merchant || !$merchant->stripe_account_id) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Invalid merchant account'
-                ], 400);
-            }
+            $merchant = $request->account;
+            // if (!$merchant || !$merchant->stripe_account_id) {
+            //     return response()->json([
+            //         'success' => false,
+            //         'message' => 'Invalid merchant account'
+            //     ], 400);
+            // }
 
             Stripe::setApiKey(config('services.stripe.secret'));
 
@@ -41,19 +42,19 @@ class PaymentController extends Controller
                 'currency' => $request->currency,
                 'application_fee_amount' => $applicationFeeAmount,
                 'transfer_data' => [
-                    'destination' => $merchant->stripe_account_id,
+                    'destination' => $merchant,
                 ],
-                'payment_method_types' => ['card_present'],
-                'capture_method' => 'manual', // For tap-to-pay, we'll capture later
+                'payment_method_types' => ['card_present'],  // Only NFC tap-to-pay, no Google Pay popup
+                'capture_method' => 'automatic', // Automatically capture after successful tap
                 'metadata' => [
-                    'merchant_id' => $merchant->id,
-                    'merchant_stripe_account' => $merchant->stripe_account_id
+                    'merchant_id' => $merchant,
+                    'merchant_stripe_account' => $merchant,
                 ]
             ]);
 
             // Save transaction
             Transaction::create([
-                'user_id' => $merchant->id,
+                'user_id' => 7, // or find the corresponding user ID if needed
                 'payment_intent_id' => $paymentIntent->id,
                 'amount' => $request->amount,
                 'platform_fee' => $applicationFeeAmount,
@@ -61,7 +62,8 @@ class PaymentController extends Controller
                 'status' => $paymentIntent->status,
                 'payment_method_type' => 'card_present',
                 'metadata' => [
-                    'merchant_stripe_account' => $merchant->stripe_account_id
+                    'merchant_stripe_account' => $merchant,
+                    'stripe_account_id' => $merchant
                 ]
             ]);
 
@@ -81,14 +83,39 @@ class PaymentController extends Controller
         }
     }
 
-    public function processNfcPayment(Request $request)
+    public function createTerminalReader(Request $request)
+    {
+        try {
+            Stripe::setApiKey(config('services.stripe.secret'));
+
+            // Create a new Terminal reader
+            $reader = \Stripe\Terminal\Reader::create([
+                'registration_code' => $request->registration_code,
+                'label' => $request->label ?? 'NFC Reader',
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'reader_id' => $reader->id,
+                    'label' => $reader->label,
+                    'status' => $reader->status
+                ]
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Reader creation failed: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    public function processTerminalPayment(Request $request)
     {
         try {
             $request->validate([
                 'payment_intent_id' => 'required|string',
-                'nfc_data' => 'required|array',
-                'nfc_data.id' => 'required|string',
-                'nfc_data.techTypes' => 'required|array'
+                'reader_id' => 'required|string'
             ]);
 
             Stripe::setApiKey(config('services.stripe.secret'));
@@ -96,53 +123,55 @@ class PaymentController extends Controller
             // Get the payment intent
             $paymentIntent = PaymentIntent::retrieve($request->payment_intent_id);
             
-            // Verify payment intent is still valid
-            if ($paymentIntent->status !== 'requires_payment_method') {
+            // Get the reader instance first
+            $reader = \Stripe\Terminal\Reader::retrieve($request->reader_id);
+            
+            // Process the payment intent with the reader
+            $reader = $reader->processPaymentIntent([
+                'payment_intent' => $paymentIntent->id
+            ]);
+
+            // Wait for payment processing (in production, use webhooks)
+            $maxAttempts = 10;
+            $attempts = 0;
+            while ($reader->action->status === 'processing' && $attempts < $maxAttempts) {
+                sleep(1);
+                $reader = \Stripe\Terminal\Reader::retrieve($reader->id);
+                $attempts++;
+            }
+
+            if ($reader->action->status === 'succeeded') {
+                // Payment was successful and automatically captured
+                $paymentIntent = PaymentIntent::retrieve($request->payment_intent_id);
+
+                // Update transaction status
+                Transaction::where('payment_intent_id', $paymentIntent->id)
+                    ->update([
+                        'status' => $paymentIntent->status,
+                        'metadata' => array_merge(
+                            (array) json_decode(Transaction::where('payment_intent_id', $paymentIntent->id)->value('metadata')),
+                            ['reader_id' => $reader->id]
+                        )
+                    ]);
+
+                return response()->json([
+                    'success' => true,
+                    'data' => [
+                        'status' => $paymentIntent->status,
+                        'amount' => $paymentIntent->amount,
+                        // 'currency' => $paymentIntent->currency
+                    ]
+                ]);
+            } else {
                 return response()->json([
                     'success' => false,
-                    'message' => 'Invalid payment intent status: ' . $paymentIntent->status
+                    'message' => 'Payment processing failed or timed out'
                 ], 400);
             }
-
-            // In a real implementation, you would use Stripe Terminal SDK to process the NFC data
-            // For now, we'll simulate the card read success and confirm the payment
-            $paymentIntent->confirm([
-                'payment_method_data' => [
-                    'type' => 'card_present',
-                    'card_present' => [
-                        'nfc_data' => $request->nfc_data['id']
-                    ]
-                ]
-            ]);
-
-            // If confirmation successful, capture the payment
-            if ($paymentIntent->status === 'requires_capture') {
-                $paymentIntent = $paymentIntent->capture();
-            }
-
-            // Update transaction status
-            Transaction::where('payment_intent_id', $paymentIntent->id)
-                ->update([
-                    'status' => $paymentIntent->status,
-                    'metadata' => array_merge(
-                        (array) json_decode(Transaction::where('payment_intent_id', $paymentIntent->id)->value('metadata')),
-                        ['nfc_tag_id' => $request->nfc_data['id']]
-                    )
-                ]);
-
-            return response()->json([
-                'success' => true,
-                'data' => [
-                    'status' => $paymentIntent->status,
-                    'amount' => $paymentIntent->amount,
-                    'currency' => $paymentIntent->currency
-                ]
-            ]);
-
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
-                'message' => 'NFC payment processing failed: ' . $e->getMessage()
+                'message' => 'Terminal payment processing failed: ' . $e->getMessage()
             ], 500);
         }
     }
